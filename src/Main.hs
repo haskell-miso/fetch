@@ -64,7 +64,7 @@ app = (component emptyModel updateModel viewModel)
 emptyModel :: Model
 emptyModel = Model Nothing
 ----------------------------------------------------------------------------
-updateModel :: Action -> Effect ROOT Model Action
+updateModel :: Action -> Effect ROOT props Model Action
 updateModel = \case
   FetchGitHub ->
     getJSON "https://api.github.com" [] SetGitHub ErrorHandler
@@ -74,8 +74,8 @@ updateModel = \case
     io_ (consoleError body)
 ----------------------------------------------------------------------------
 -- | View function, with routing
-viewModel :: Model -> View Model Action
-viewModel m =
+viewModel :: props -> Model -> View Model Action
+viewModel _ m =
   H.div_
       [ CSS.style_
         [ CSS.textAlign "center"
