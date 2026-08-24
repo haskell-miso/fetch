@@ -1,7 +1,5 @@
 -----------------------------------------------------------------------------
 {-# LANGUAGE CPP               #-}
-{-# LANGUAGE DataKinds         #-}
-{-# LANGUAGE DeriveGeneric     #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE RecordWildCards   #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -16,158 +14,216 @@
 ----------------------------------------------------------------------------
 module Main where
 ----------------------------------------------------------------------------
-import           Data.Maybe
-import           GHC.Generics
-----------------------------------------------------------------------------
-import           Miso hiding (defaultOptions)
-import           Miso.JSON
-import           Miso.String
-import qualified Miso.Html.Event as E
-import qualified Miso.Html.Element as H
-import qualified Miso.Html.Property as P
+import           Miso
+import           Miso.JSON          hiding ((.=))
 import           Miso.Lens
-import qualified Miso.CSS as CSS
+import qualified Miso.Html.Element  as H
+import           Miso.Html.Event    (onInput, onSubmit)
+import qualified Miso.Html.Property as P
+import           Miso.String        (null, strip)
+import           Prelude            hiding (null)
 ----------------------------------------------------------------------------
 #ifdef WASM
 foreign export javascript "hs_start" main :: IO ()
 #endif
 ----------------------------------------------------------------------------
--- | Main entry point
+-- | A GitHub user (or organization).
+data GitHubUser = GitHubUser
+  { userLogin     :: MisoString
+  , userName      :: Maybe MisoString
+  , userAvatar    :: MisoString
+  , userBio       :: Maybe MisoString
+  , userFollowers :: Int
+  , userRepoCount :: Int
+  , userUrl       :: MisoString
+  } deriving (Eq, Show)
+----------------------------------------------------------------------------
+instance FromJSON GitHubUser where
+  parseJSON = withObject "user" $ \o -> GitHubUser
+    <$> o .:  "login"
+    <*> o .:? "name"
+    <*> o .:  "avatar_url"
+    <*> o .:? "bio"
+    <*> o .:  "followers"
+    <*> o .:  "public_repos"
+    <*> o .:  "html_url"
+----------------------------------------------------------------------------
+-- | A repository, as returned by the @/users/:login/repos@ endpoint.
+data GitHubRepo = GitHubRepo
+  { repoName  :: MisoString
+  , repoDesc  :: Maybe MisoString
+  , repoStars :: Int
+  , repoLang  :: Maybe MisoString
+  , repoUrl   :: MisoString
+  } deriving (Eq, Show)
+----------------------------------------------------------------------------
+instance FromJSON GitHubRepo where
+  parseJSON = withObject "repo" $ \o -> GitHubRepo
+    <$> o .:  "name"
+    <*> o .:? "description"
+    <*> o .:  "stargazers_count"
+    <*> o .:? "language"
+    <*> o .:  "html_url"
+----------------------------------------------------------------------------
+data Model = Model
+  { _query :: MisoString
+  , _user  :: Maybe GitHubUser
+  , _repos :: [GitHubRepo]
+  , _busy  :: Bool
+  , _oops  :: Maybe MisoString
+  } deriving (Eq, Show)
+----------------------------------------------------------------------------
+query :: Lens Model MisoString
+query = lens _query $ \m x -> m { _query = x }
+
+user :: Lens Model (Maybe GitHubUser)
+user = lens _user $ \m x -> m { _user = x }
+
+repos :: Lens Model [GitHubRepo]
+repos = lens _repos $ \m x -> m { _repos = x }
+
+busy :: Lens Model Bool
+busy = lens _busy $ \m x -> m { _busy = x }
+
+oops :: Lens Model (Maybe MisoString)
+oops = lens _oops $ \m x -> m { _oops = x }
+----------------------------------------------------------------------------
+data Action
+  = SetQuery MisoString
+  | Search
+  | GotUser (Response GitHubUser)
+  | GotRepos (Response [GitHubRepo])
+  | FetchFailed (Response MisoString)
+----------------------------------------------------------------------------
+emptyModel :: Model
+emptyModel = Model "haskell-miso" Nothing [] False Nothing
+----------------------------------------------------------------------------
 main :: IO ()
 main = startApp defaultEvents app
 ----------------------------------------------------------------------------
--- | Model
-newtype Model = Model
-  { _info :: Maybe GitHub
-  } deriving (Eq, Show)
-----------------------------------------------------------------------------
--- | Lens for info field
-info :: Lens Model (Maybe GitHub)
-info = lens _info $ \r x -> r { _info = x }
-----------------------------------------------------------------------------
--- | Action
-data Action
-  = FetchGitHub
-  | SetGitHub (Response GitHub)
-  | ErrorHandler (Response MisoString)
-----------------------------------------------------------------------------
 app :: App Model Action
 app = (component emptyModel updateModel viewModel)
-#ifndef WASM
-  { styles =
-    [ Href "https://cdnjs.cloudflare.com/ajax/libs/bulma/0.4.3/css/bulma.min.css" True
-    , Href "https://maxcdn.bootstrapcdn.com/font-awesome/4.7.0/css/font-awesome.min.css" True
-    ]
+  { mount = Just Search
   }
-#endif
 ----------------------------------------------------------------------------
-emptyModel :: Model
-emptyModel = Model Nothing
+api :: MisoString
+api = "https://api.github.com/users/"
 ----------------------------------------------------------------------------
-updateModel :: Action -> Effect ROOT Model Action
+updateModel :: Action -> Effect context props Model Action
 updateModel = \case
-  FetchGitHub ->
-    getJSON "https://api.github.com" [] SetGitHub ErrorHandler
-  SetGitHub Response {..} ->
-    info ?= body
-  ErrorHandler Response {..} ->
-    io_ (consoleError body)
+  SetQuery q ->
+    query .= q
+  Search -> do
+    q <- strip <$> use query
+    if null q
+      then pure ()
+      else do
+        busy .= True
+        oops .= Nothing
+        getJSON (api <> q) [] GotUser FetchFailed
+  GotUser Response {..} -> do
+    user ?= body
+    getJSON (api <> userLogin body <> "/repos?sort=updated&per_page=6")
+      [] GotRepos FetchFailed
+  GotRepos Response {..} -> do
+    busy .= False
+    repos .= body
+  FetchFailed Response {..} -> do
+    busy .= False
+    user .= Nothing
+    repos .= []
+    oops ?= case status of
+      Just 404 -> "No such user or organization."
+      Just 403 -> "GitHub API rate limit reached — try again in a minute."
+      _        -> "Request failed: " <> body
 ----------------------------------------------------------------------------
--- | View function, with routing
-viewModel :: Model -> View Model Action
-viewModel m =
+viewModel :: () -> () -> Model -> View () Model Action
+viewModel _ _ m =
   H.div_
-      [ CSS.style_
-        [ CSS.textAlign "center"
-        , CSS.margin "200px"
+  [ P.class_ "app" ]
+  [ H.header_
+    [ P.class_ "hero" ]
+    [ H.h1_ [] [ "🍜 🌐 ", H.a_ [ P.href_ repoLink ] [ "miso-fetch" ] ]
+    , H.p_ [ P.class_ "tagline" ]
+      [ "The browser Fetch API from Haskell: typed JSON requests against "
+      , "the live GitHub API, decoded with "
+      , H.code_ [] [ "Miso.JSON" ]
+      , "."
+      ]
+    , H.a_ [ P.class_ "gh", P.href_ repoLink ] [ "View source on GitHub" ]
+    ]
+  , H.main_
+    [ P.class_ "panel" ]
+    ( [ H.form_
+        [ P.class_ "search", onSubmit Search ]
+        [ H.input_
+          [ P.type_ "text"
+          , P.value_ (m ^. query)
+          , P.placeholder_ "GitHub user or organization…"
+          , P.autofocus_ True
+          , onInput SetQuery
+          ]
+        , H.button_
+          [ P.class_ "btn", P.type_ "submit" ]
+          [ text (if m ^. busy then "Fetching…" else "Fetch") ]
         ]
       ]
-      [ H.h1_
-        [ P.class_ $ pack "title"
-        ]
-        [ "🍜 Miso Fetch API"
-        ]
-      , optionalAttrs
-        H.button_
-        [ E.onClick FetchGitHub
-        , P.class_ (pack "button is-large is-outlined")
-        ]
-        (isJust (m ^. info))
-        [ P.disabled_
-        ]
-        [ "Fetch JSON from https://api.github.com"
-        ]
-      , case m ^. info of
-          Nothing ->
-            H.div_
-            []
-            [ "No data"
-            ]
-          Just GitHub {..} ->
-            H.table_
-            [ P.class_ "table is-striped" ]
-            [ H.thead_
-              []
-              [ H.tr_
-                []
-                [ H.th_
-                  []
-                  [ text "URLs"
-                  ]
-                ]
-              ]
-            , H.tbody_
-              []
-              [ tr currentUserUrl
-              , tr emojisUrl
-              , tr emailsUrl
-              , tr eventsUrl
-              , tr gistsUrl
-              , tr feedsUrl
-              , tr followersUrl
-              , tr followingUrl
-              ]
-            ]
+      ++ [ H.p_ [ P.class_ "error" ] [ text e ] | Just e <- [ m ^. oops ] ]
+      ++ maybe [] (pure . userCard) (m ^. user)
+      ++ [ repoGrid (m ^. repos) | m ^. repos /= [] ]
+    )
+  , H.footer_
+    [ P.class_ "foot" ]
+    [ H.p_ []
+      [ "Built with "
+      , H.a_ [ P.href_ "https://github.com/dmjio/miso" ] [ "miso" ]
+      , ", a Haskell web framework — compiled to WebAssembly. Requests go "
+      , "straight to ", H.code_ [] [ "api.github.com" ], "; no backend involved."
       ]
+    ]
+  ]
   where
-    tr :: MisoString -> View Model action
-    tr x = H.tr_ [] [ H.td_ [] [ text x ] ]
+    repoLink = "https://github.com/haskell-miso/miso-fetch"
 ----------------------------------------------------------------------------
--- | Structure to capture the JSON returned from https://api.github.com
-data GitHub
-  = GitHub
-  { currentUserUrl
-  , currentUserAuthorizationsHtmlUrl
-  , authorizationsUrl
-  , codeSearchUrl
-  , commitSearchUrl
-  , emailsUrl
-  , emojisUrl
-  , eventsUrl
-  , feedsUrl
-  , followersUrl
-  , followingUrl
-  , gistsUrl
-  , hubUrl
-  , issueSearchUrl
-  , issuesUrl
-  , keysUrl
-  , notificationsUrl
-  , organizationRepositoriesUrl
-  , organizationUrl
-  , publicGistsUrl
-  , rateLimitUrl
-  , repositoryUrl
-  , repositorySearchUrl
-  , currentUserRepositoriesUrl
-  , starredUrl
-  , starredGistsUrl
-  , userUrl
-  , userOrganizationsUrl
-  , userRepositoriesUrl
-  , userSearchUrl :: MisoString
-  } deriving (Show, Eq, Generic)
+userCard :: GitHubUser -> View () Model Action
+userCard GitHubUser {..} =
+  H.section_
+  [ P.class_ "user" ]
+  [ H.img_ [ P.class_ "avatar", P.src_ userAvatar, P.alt_ (userLogin <> " avatar") ]
+  , H.div_
+    [ P.class_ "user-info" ]
+    ( [ H.h2_ []
+        [ H.a_ [ P.href_ userUrl ] [ text (maybe userLogin id userName) ]
+        , H.span_ [ P.class_ "login" ] [ text ("@" <> userLogin) ]
+        ]
+      ]
+      ++ [ H.p_ [ P.class_ "bio" ] [ text b ] | Just b <- [ userBio ] ]
+      ++ [ H.p_ [ P.class_ "stats" ]
+           [ H.strong_ [] [ text (ms userRepoCount) ], " public repos · "
+           , H.strong_ [] [ text (ms userFollowers) ], " followers"
+           ]
+         ]
+    )
+  ]
 ----------------------------------------------------------------------------
-instance FromJSON GitHub where
-  parseJSON = genericParseJSON defaultOptions { fieldLabelModifier = camelTo2 '_' }
+repoGrid :: [GitHubRepo] -> View () Model Action
+repoGrid rs =
+  H.div_
+  []
+  [ H.h3_ [ P.class_ "repos-title" ] [ "Recently updated repositories" ]
+  , H.div_
+    [ P.class_ "repos" ]
+    [ H.a_
+      [ P.class_ "repo", P.href_ repoUrl ]
+      ( [ H.h4_ [] [ text repoName ] ]
+        ++ [ H.p_ [ P.class_ "desc" ] [ text d ] | Just d <- [ repoDesc ] ]
+        ++ [ H.p_ [ P.class_ "meta" ]
+             [ text ("★ " <> ms repoStars)
+             , text (maybe "" (" · " <>) repoLang)
+             ]
+           ]
+      )
+    | GitHubRepo {..} <- rs
+    ]
+  ]
 ----------------------------------------------------------------------------
