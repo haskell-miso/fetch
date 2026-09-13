@@ -137,8 +137,8 @@ updateModel = \case
       Just 403 -> "GitHub API rate limit reached — try again in a minute."
       _        -> "Request failed: " <> body
 ----------------------------------------------------------------------------
-viewModel :: () -> () -> Model -> View () Model Action
-viewModel _ _ m =
+viewModel :: Model -> View () () Model Action
+viewModel m =
   H.div_
   [ P.class_ "app" ]
   [ H.header_
@@ -185,7 +185,7 @@ viewModel _ _ m =
   where
     repoLink = "https://github.com/haskell-miso/miso-fetch"
 ----------------------------------------------------------------------------
-userCard :: GitHubUser -> View () Model Action
+userCard :: GitHubUser -> View () () Model Action
 userCard GitHubUser {..} =
   H.section_
   [ P.class_ "user" ]
@@ -206,7 +206,7 @@ userCard GitHubUser {..} =
     )
   ]
 ----------------------------------------------------------------------------
-repoGrid :: [GitHubRepo] -> View () Model Action
+repoGrid :: [GitHubRepo] -> View () () Model Action
 repoGrid rs =
   H.div_
   []
